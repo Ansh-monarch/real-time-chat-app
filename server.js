@@ -15,26 +15,29 @@ const io = socketIo(server, {
 app.use(cors());
 app.use(express.json());
 
-// Store chat state with rooms
+// Store chat state with fixed 3 rooms
 const chatState = {
   rooms: {
-    'general': {
-      name: 'General Chat',
+    'room1': {
+      name: 'Room 1',
       users: [],
       messages: [],
-      createdAt: new Date()
+      createdAt: new Date(),
+      owner: null
     },
-    'gaming': {
-      name: 'Gaming',
+    'room2': {
+      name: 'Room 2',
       users: [],
       messages: [],
-      createdAt: new Date()
+      createdAt: new Date(),
+      owner: null
     },
-    'random': {
-      name: 'Random',
+    'room3': {
+      name: 'Room 3', 
       users: [],
       messages: [],
-      createdAt: new Date()
+      createdAt: new Date(),
+      owner: null
     }
   },
   activeUsers: new Map()
@@ -47,7 +50,7 @@ function getAvailableRooms() {
     name: room.name,
     userCount: room.users.length,
     messageCount: room.messages.length,
-    createdAt: room.createdAt
+    owner: room.owner
   }));
 }
 
@@ -59,8 +62,17 @@ function joinRoom(userId, username, roomId) {
   const user = {
     id: userId,
     username: username,
-    joinedAt: new Date()
+    joinedAt: new Date(),
+    isOwner: false
   };
+  
+  // Set as owner if room has no owner
+  if (!chatState.rooms[roomId].owner) {
+    chatState.rooms[roomId].owner = userId;
+    user.isOwner = true;
+  } else if (chatState.rooms[roomId].owner === userId) {
+    user.isOwner = true;
+  }
   
   // Remove user from any other rooms first
   Object.keys(chatState.rooms).forEach(roomKey => {
@@ -90,6 +102,16 @@ function leaveRoom(userId, roomId) {
   if (userIndex !== -1) {
     const user = chatState.rooms[roomId].users[userIndex];
     chatState.rooms[roomId].users.splice(userIndex, 1);
+    
+    // If owner leaves, assign new owner or clear owner
+    if (chatState.rooms[roomId].owner === userId) {
+      if (chatState.rooms[roomId].users.length > 0) {
+        chatState.rooms[roomId].owner = chatState.rooms[roomId].users[0].id;
+        chatState.rooms[roomId].users[0].isOwner = true;
+      } else {
+        chatState.rooms[roomId].owner = null;
+      }
+    }
     
     const socket = io.sockets.sockets.get(userId);
     if (socket) {
@@ -142,9 +164,11 @@ io.on('connection', (socket) => {
     socket.username = username;
     
     // Send room data to the joining user
+    const userData = chatState.rooms[roomId].users.find(user => user.id === socket.id);
     socket.emit('roomJoined', {
       room: chatState.rooms[roomId],
-      users: chatState.rooms[roomId].users
+      users: chatState.rooms[roomId].users,
+      isOwner: userData ? userData.isOwner : false
     });
     
     // Notify room about new user
@@ -185,9 +209,9 @@ io.on('connection', (socket) => {
     // Store message in room
     chatState.rooms[roomId].messages.push(messageObj);
     
-    // Keep only last 500 messages per room
-    if (chatState.rooms[roomId].messages.length > 500) {
-      chatState.rooms[roomId].messages = chatState.rooms[roomId].messages.slice(-500);
+    // Keep only last 200 messages per room
+    if (chatState.rooms[roomId].messages.length > 200) {
+      chatState.rooms[roomId].messages = chatState.rooms[roomId].messages.slice(-200);
     }
     
     // Broadcast to room
@@ -216,46 +240,36 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle room creation
-  socket.on('createRoom', (data) => {
-    const { roomId, roomName } = data;
-    
-    if (!roomId || !roomName) {
-      socket.emit('error', { message: 'Room ID and name are required' });
-      return;
-    }
-    
-    if (roomId.length < 3) {
-      socket.emit('error', { message: 'Room ID must be at least 3 characters' });
-      return;
-    }
-    
-    if (chatState.rooms[roomId]) {
-      socket.emit('error', { message: 'Room already exists' });
-      return;
-    }
-    
-    // Create new room
-    chatState.rooms[roomId] = {
-      name: roomName,
-      users: [],
-      messages: [],
-      createdAt: new Date()
-    };
-    
-    // Notify all users about new room
-    io.emit('roomCreated', {
-      roomId: roomId,
-      name: roomName,
-      userCount: 0
-    });
-    
-    console.log(`🚀 New room created: ${roomName} (${roomId})`);
-  });
-
   // Handle get rooms request
   socket.on('getRooms', () => {
     socket.emit('availableRooms', getAvailableRooms());
+  });
+
+  // Handle clear chat (owner only)
+  socket.on('clearChat', (data) => {
+    const { roomId } = data;
+    
+    if (!roomId || !chatState.rooms[roomId]) {
+      socket.emit('error', { message: 'Room not found' });
+      return;
+    }
+    
+    // Check if user is owner
+    if (chatState.rooms[roomId].owner !== socket.id) {
+      socket.emit('error', { message: 'Only room owner can clear chat' });
+      return;
+    }
+    
+    // Clear messages
+    chatState.rooms[roomId].messages = [];
+    
+    // Notify room
+    io.to(roomId).emit('chatCleared', {
+      clearedBy: socket.username,
+      roomId: roomId
+    });
+    
+    console.log(`🗑️ ${socket.username} cleared chat in ${roomId}`);
   });
 
   // Handle user disconnect
@@ -281,7 +295,7 @@ io.on('connection', (socket) => {
 // API Routes
 app.get('/', (req, res) => {
   res.json({
-    message: 'Multi-Room Chat Server',
+    message: '3-Room Chat Server',
     status: 'running',
     totalRooms: Object.keys(chatState.rooms).length,
     totalUsers: chatState.activeUsers.size,
@@ -301,51 +315,7 @@ app.get('/health', (req, res) => {
 app.get('/rooms', (req, res) => {
   res.json({
     rooms: getAvailableRooms(),
-    totalUsers: chatState.activeUsers.size,
-    serverTime: new Date()
-  });
-});
-
-app.get('/rooms/:roomId', (req, res) => {
-  const roomId = req.params.roomId;
-  const room = chatState.rooms[roomId];
-  
-  if (room) {
-    res.json({
-      roomId: roomId,
-      name: room.name,
-      userCount: room.users.length,
-      messageCount: room.messages.length,
-      users: room.users.map(user => ({
-        username: user.username,
-        joinedAt: user.joinedAt
-      })),
-      recentMessages: room.messages.slice(-50),
-      createdAt: room.createdAt
-    });
-  } else {
-    res.status(404).json({ error: 'Room not found' });
-  }
-});
-
-app.get('/stats', (req, res) => {
-  const roomStats = Object.entries(chatState.rooms).map(([id, room]) => ({
-    id: id,
-    name: room.name,
-    users: room.users.length,
-    messages: room.messages.length,
-    createdAt: room.createdAt
-  }));
-  
-  res.json({
-    server: {
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      connections: io.engine.clientsCount
-    },
-    rooms: roomStats,
-    totalUsers: chatState.activeUsers.size,
-    activeRooms: Object.keys(chatState.rooms).length
+    totalUsers: chatState.activeUsers.size
   });
 });
 
@@ -353,17 +323,7 @@ app.get('/stats', (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
-  console.log(`🚀 Multi-Room Chat server running on port ${PORT}`);
+  console.log(`🚀 3-Room Chat server running on port ${PORT}`);
   console.log(`📍 Local: http://localhost:${PORT}`);
-  console.log(`💬 Room-based Chat Server Ready!`);
-  console.log(`📊 Initial rooms: ${Object.keys(chatState.rooms).join(', ')}`);
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('🛑 Shutting down server gracefully...');
-  server.close(() => {
-    console.log('✅ Server closed');
-    process.exit(0);
-  });
+  console.log(`💬 Fixed Rooms: Room 1, Room 2, Room 3`);
 });

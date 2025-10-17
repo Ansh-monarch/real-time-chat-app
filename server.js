@@ -24,15 +24,22 @@ const rooms = {
 
 console.log('🚀 Server starting with rooms:', Object.keys(rooms));
 
-io.on('connection', (socket) => {
-  console.log('🔗 User connected:', socket.id);
-
-  // Send room list
-  socket.emit('roomsList', Object.keys(rooms).map(id => ({
+// Function to broadcast room updates to ALL users
+function broadcastRoomUpdates() {
+  const roomData = Object.keys(rooms).map(id => ({
     id: id,
     name: rooms[id].name,
     userCount: rooms[id].users.length
-  })));
+  }));
+  
+  io.emit('roomsUpdate', roomData);
+}
+
+io.on('connection', (socket) => {
+  console.log('🔗 User connected:', socket.id);
+
+  // Send initial room data
+  broadcastRoomUpdates();
 
   // Join room
   socket.on('joinRoom', (data) => {
@@ -41,16 +48,12 @@ io.on('connection', (socket) => {
     const { username, roomId } = data;
     
     if (!username || !roomId) {
-      console.log('❌ Missing username or roomId');
       socket.emit('error', { message: 'Username and room ID are required' });
       return;
     }
     
-    // Check if room exists
     if (!rooms[roomId]) {
-      console.log('❌ Room not found:', roomId);
-      console.log('✅ Available rooms:', Object.keys(rooms));
-      socket.emit('error', { message: `Room "${roomId}" not found. Available: ${Object.keys(rooms).join(', ')}` });
+      socket.emit('error', { message: `Room not found` });
       return;
     }
     
@@ -58,11 +61,17 @@ io.on('connection', (socket) => {
     if (socket.roomId) {
       console.log(`🚪 Leaving previous room: ${socket.roomId}`);
       const oldRoom = rooms[socket.roomId];
-      oldRoom.users = oldRoom.users.filter(user => user.id !== socket.id);
+      const userIndex = oldRoom.users.findIndex(user => user.id === socket.id);
+      if (userIndex !== -1) {
+        oldRoom.users.splice(userIndex, 1);
+      }
+      
+      // Notify old room and update counts
       socket.to(socket.roomId).emit('userLeft', { 
         username: socket.username, 
         users: oldRoom.users 
       });
+      broadcastRoomUpdates(); // Update all room counts
     }
     
     // Join new room
@@ -89,6 +98,9 @@ io.on('connection', (socket) => {
       username: username,
       users: rooms[roomId].users
     });
+    
+    // Update all room counts for everyone
+    broadcastRoomUpdates();
   });
 
   // Send message
@@ -97,13 +109,7 @@ io.on('connection', (socket) => {
     
     const { message, roomId } = data;
     
-    if (!socket.roomId || !socket.username) {
-      console.log('❌ User not in a room or no username');
-      return;
-    }
-    
-    if (socket.roomId !== roomId) {
-      console.log(`❌ User in ${socket.roomId} but trying to send to ${roomId}`);
+    if (!socket.roomId || !socket.username || socket.roomId !== roomId) {
       return;
     }
     
@@ -115,12 +121,37 @@ io.on('connection', (socket) => {
       userId: socket.id
     };
     
-    // Store message
     rooms[roomId].messages.push(messageObj);
-    console.log(`💬 Message stored in ${roomId}: ${message}`);
-    
-    // Send to everyone in room
     io.to(roomId).emit('newMessage', messageObj);
+  });
+
+  // Handle user leaving room manually
+  socket.on('leaveRoom', () => {
+    if (socket.roomId && rooms[socket.roomId]) {
+      const room = rooms[socket.roomId];
+      const userIndex = room.users.findIndex(user => user.id === socket.id);
+      
+      if (userIndex !== -1) {
+        const username = room.users[userIndex].username;
+        room.users.splice(userIndex, 1);
+        
+        socket.leave(socket.roomId);
+        
+        // Notify room
+        socket.to(socket.roomId).emit('userLeft', {
+          username: username,
+          users: room.users
+        });
+        
+        // Update counts for everyone
+        broadcastRoomUpdates();
+        
+        console.log(`🚪 ${username} manually left ${socket.roomId}`);
+        
+        // Reset user's room
+        socket.roomId = null;
+      }
+    }
   });
 
   // Disconnect
@@ -129,14 +160,23 @@ io.on('connection', (socket) => {
     
     if (socket.roomId && rooms[socket.roomId]) {
       const room = rooms[socket.roomId];
-      room.users = room.users.filter(user => user.id !== socket.id);
+      const userIndex = room.users.findIndex(user => user.id === socket.id);
       
-      socket.to(socket.roomId).emit('userLeft', { 
-        username: socket.username, 
-        users: room.users 
-      });
-      
-      console.log(`🚪 ${socket.username} left ${socket.roomId}`);
+      if (userIndex !== -1) {
+        const username = room.users[userIndex].username;
+        room.users.splice(userIndex, 1);
+        
+        // Notify room
+        socket.to(socket.roomId).emit('userLeft', {
+          username: username,
+          users: room.users
+        });
+        
+        // Update counts for everyone
+        broadcastRoomUpdates();
+        
+        console.log(`🚪 ${username} disconnected from ${socket.roomId}`);
+      }
     }
   });
 });
@@ -144,7 +184,7 @@ io.on('connection', (socket) => {
 // Routes
 app.get('/', (req, res) => {
   res.json({
-    message: '3-Room Chat Server - DEBUG VERSION',
+    message: '3-Room Chat Server - FIXED USER COUNTS',
     status: 'running',
     rooms: Object.keys(rooms).map(id => ({
       id: id,
@@ -155,16 +195,7 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/debug', (req, res) => {
-  res.json({
-    rooms: rooms,
-    totalConnections: io.engine.clientsCount
-  });
-});
-
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🚀 DEBUG Chat server running on port ${PORT}`);
-  console.log('✅ Rooms ready: room1, room2, room3');
-  console.log('📍 Test URL: http://localhost:' + PORT);
+  console.log(`🚀 Fixed Chat server running on port ${PORT}`);
 });
